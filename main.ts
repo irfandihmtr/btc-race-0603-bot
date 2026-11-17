@@ -1,15 +1,13 @@
-// Kandidat B-final — quasi buy-and-hold + filter rezim (versi panel B).
-// Satu-satunya keluarga positif terukur di window ini adalah beli-sekali +
-// tahan-sampai-akhir (buy-and-hold +$1,07; momentum +$2,45; keduanya 1 trade).
-// Semua strategi aktif (A/E/D) kalah oleh mean-reversion + biaya ~36 bps.
-// Maka B: SATU entry awal, lalu tahan sampai akhir (harness flatten).
+// Kandidat B2 — quasi buy-and-hold, horizon 1 jam (varian B-final).
+// B-final dev -$0,32 (1 trade, entry bar 120-179 di h02 ~$64,700): selisih
+// tipis dari gerbang. Varian ini memendekkan lookback dip ke 60 bar (1 jam)
+// supaya sinyal recovery pertama di h00-h01 tidak terlewat menunggu
+// histori 120 bar — entry lebih awal di harga lebih rendah adalah inti
+// buy-and-hold, bukan tuning per-bar. Sisanya identik B-final: satu entry
+// awal, tahan sampai akhir, ukuran 100% ekuitas.
 //
-// Entry fase 1 (bar 120-480): beli dip — close pernah >=0,5% di bawah high
-//   120 bar terakhir (dipArmed), lalu close kembali di atas EMA-20 (recovery).
-// Entry fase 2 (bar 480-960, bila masih flat): close > EMA-60 (tren naik).
-// Ukuran 100% ekuitas: satu trade saja, dan hitungan biaya menunjukkan
-//   50% tak bisa mencapai target +$3 di window ini (penyimpangan sadar
-//   dari panduan 30-50% brief, dicatat di laporan).
+// Entry fase 1 (bar 60-480): close pernah >=0,5% di bawah high 60 bar,
+//   lalu close kembali di atas EMA-20. Fase 2 (480-960): close > EMA-60.
 // Exit: tidak ada — tahan sampai akhir window.
 // Tanpa wall clock, tanpa file luar repo, tanpa Math.random — deterministik
 // dari bar yang dikirim harness (hello/batch). Order: buy
@@ -20,10 +18,10 @@ import type { BarsState, Batch, OrderInput } from "./vendor/makefun-bars.ts";
 
 const SYMBOL = "CBBTC";
 const PRICE_SCALE = 1e5; // harga bar di price_scale 5 -> USDC
-const HIGH_N = 120;
+const HIGH_N = 60;
 const EMA_FAST = 20;
 const EMA_SLOW = 60;
-const DIP_PCT = 0.005; // >=0,5% di bawah high 120 bar
+const DIP_PCT = 0.005; // >=0,5% di bawah high 60 bar
 const PHASE1_END = 480; // 8 jam
 const PHASE2_END = 960; // 16 jam
 const SIZE_BPS = 10000; // 100% ekuitas, satu entry
@@ -37,7 +35,7 @@ let dipArmed = false;
 let bought = false;
 let trades = 0;
 
-function high120(): number {
+function highN(): number {
   let m = -Infinity;
   for (const h of highs) if (h > m) m = h;
   return m;
@@ -50,7 +48,7 @@ await runBars({
     const close = Number(bar.c) / PRICE_SCALE;
     const high = Number(bar.h) / PRICE_SCALE;
 
-    const prevHigh = highs.length >= HIGH_N ? high120() : -Infinity;
+    const prevHigh = highs.length >= HIGH_N ? highN() : -Infinity;
     const prevFast = emaFast;
     const prevSlow = emaSlow;
 
@@ -72,7 +70,7 @@ await runBars({
     }
     if (closes.length < HIGH_N || prevFast === null || prevSlow === null) return [];
 
-    // Tandai dip: close >=0,5% di bawah high 120 bar.
+    // Tandai dip: close >=0,5% di bawah high 60 bar.
     if (close < prevHigh * (1 - DIP_PCT)) dipArmed = true;
 
     let signal = false;
@@ -93,6 +91,6 @@ await runBars({
     return [{ side: "buy", symbol: SYMBOL, notional_quote_units: notional, max_slippage_bps: MAX_SLIPPAGE_BPS }];
   },
   onDone(_state: BarsState) {
-    console.error(`kandidat-B-final selesai: trade yang diputuskan=${trades}`);
+    console.error(`kandidat-B2 selesai: trade yang diputuskan=${trades}`);
   },
 });

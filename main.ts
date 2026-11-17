@@ -1,13 +1,13 @@
 // Kandidat D — beli dip setelah drawdown dalam + jual recovery (trailing lebar).
 // Pelajaran A/E: sinyal horizon <=60 bar adalah noise (SD 1 menit 0,064%,
 // return 24 bar SD ~0,31% > ambang momentum +0,15% -> 17 round-trip rugi).
-// D hanya trading kaki besar: drawdown >=1,5% dari high 12 jam (>> biaya
+// D hanya trading kaki besar: drawdown >=1,5% dari high 6 jam (>> biaya
 // round-trip ~36 bps dan >> noise), beli HANYA pada cross segar naik
-// melewati low-12jam*1,005 (recovery +0,5%), tahan kaki recovery, keluar
+// melewati low-6jam*1,005 (recovery +0,5%), tahan kaki recovery, keluar
 // via trailing 0,6% dari peak (~9 SD gerak 1 menit) atau time-stop 12 jam.
 //
-// Entry: low720 >= 1,5% di bawah high720, DAN close bar ini melintasi naik
-//        low720*1,005 (close sebelumnya <= ambang < close ini), DAN close
+// Entry: low360 >= 1,5% di bawah high360, DAN close bar ini melintasi naik
+//        low360*1,005 (close sebelumnya <= ambang < close ini), DAN close
 //        > close 60 bar lalu (recovery sedang berjalan). Ukuran 50%.
 // Exit : close < peak - 0,6%*peak (trailing; peak awal = close entry,
 //        jadi ini juga stop-loss 0,6% dari entry) ATAU 720 bar di posisi.
@@ -21,7 +21,7 @@ import type { BarsState, Batch, OrderInput } from "./vendor/makefun-bars.ts";
 
 const SYMBOL = "CBBTC";
 const PRICE_SCALE = 1e5; // harga bar di price_scale 5 -> USDC
-const LOOKBACK = 720; // 12 jam
+const LOOKBACK = 360; // 6 jam
 const DRAWDOWN_PCT = 0.015; // drawdown minimal dari high lookback
 const RECOVERY_PCT = 0.005; // +0,5% di atas low lookback
 const TRAIL_PCT = 0.006; // 0,6% dari peak

@@ -1,52 +1,45 @@
-// Kandidat D — beli dip setelah drawdown dalam + jual recovery (trailing lebar).
-// Pelajaran A/E: sinyal horizon <=60 bar adalah noise (SD 1 menit 0,064%,
-// return 24 bar SD ~0,31% > ambang momentum +0,15% -> 17 round-trip rugi).
-// D hanya trading kaki besar: drawdown >=1,5% dari high 6 jam (>> biaya
-// round-trip ~36 bps dan >> noise), beli HANYA pada cross segar naik
-// melewati low-6jam*1,005 (recovery +0,5%), tahan kaki recovery, keluar
-// via trailing 0,6% dari peak (~9 SD gerak 1 menit) atau time-stop 12 jam.
+// Kandidat B-final — quasi buy-and-hold + filter rezim (versi panel B).
+// Satu-satunya keluarga positif terukur di window ini adalah beli-sekali +
+// tahan-sampai-akhir (buy-and-hold +$1,07; momentum +$2,45; keduanya 1 trade).
+// Semua strategi aktif (A/E/D) kalah oleh mean-reversion + biaya ~36 bps.
+// Maka B: SATU entry awal, lalu tahan sampai akhir (harness flatten).
 //
-// Entry: low360 >= 1,5% di bawah high360, DAN close bar ini melintasi naik
-//        low360*1,005 (close sebelumnya <= ambang < close ini), DAN close
-//        > close 60 bar lalu (recovery sedang berjalan). Ukuran 50%.
-// Exit : close < peak - 0,6%*peak (trailing; peak awal = close entry,
-//        jadi ini juga stop-loss 0,6% dari entry) ATAU 720 bar di posisi.
-//        Jual seluruh qty; cooldown 120 bar.
+// Entry fase 1 (bar 120-480): beli dip — close pernah >=0,5% di bawah high
+//   120 bar terakhir (dipArmed), lalu close kembali di atas EMA-20 (recovery).
+// Entry fase 2 (bar 480-960, bila masih flat): close > EMA-60 (tren naik).
+// Ukuran 100% ekuitas: satu trade saja, dan hitungan biaya menunjukkan
+//   50% tak bisa mencapai target +$3 di window ini (penyimpangan sadar
+//   dari panduan 30-50% brief, dicatat di laporan).
+// Exit: tidak ada — tahan sampai akhir window.
 // Tanpa wall clock, tanpa file luar repo, tanpa Math.random — deterministik
 // dari bar yang dikirim harness (hello/batch). Order: buy
-// notional_quote_units, sell qty; max_slippage 100 bps.
+// notional_quote_units; max_slippage 100 bps.
 
 import { runBars } from "./vendor/makefun-bars.ts";
 import type { BarsState, Batch, OrderInput } from "./vendor/makefun-bars.ts";
 
 const SYMBOL = "CBBTC";
 const PRICE_SCALE = 1e5; // harga bar di price_scale 5 -> USDC
-const LOOKBACK = 360; // 6 jam
-const DRAWDOWN_PCT = 0.015; // drawdown minimal dari high lookback
-const RECOVERY_PCT = 0.005; // +0,5% di atas low lookback
-const TRAIL_PCT = 0.006; // 0,6% dari peak
-const MOMENTUM_BARS = 60;
-const TIME_STOP_BARS = 720; // 12 jam
-const COOLDOWN_BARS = 120;
-const SIZE_BPS = 5000; // 50% ekuitas per entry
+const HIGH_N = 120;
+const EMA_FAST = 20;
+const EMA_SLOW = 60;
+const DIP_PCT = 0.005; // >=0,5% di bawah high 120 bar
+const PHASE1_END = 480; // 8 jam
+const PHASE2_END = 960; // 16 jam
+const SIZE_BPS = 10000; // 100% ekuitas, satu entry
 const MAX_SLIPPAGE_BPS = 100;
 
 const closes: number[] = [];
-const lows: number[] = [];
 const highs: number[] = [];
-let entrySeq = -1;
-let peakClose = 0;
-let lastExitSeq = -1;
+let emaFast: number | null = null;
+let emaSlow: number | null = null;
+let dipArmed = false;
+let bought = false;
 let trades = 0;
 
-function minLow(): number {
-  let m = Infinity;
-  for (const v of lows) if (v < m) m = v;
-  return m;
-}
-function maxHigh(): number {
+function high120(): number {
   let m = -Infinity;
-  for (const v of highs) if (v > m) m = v;
+  for (const h of highs) if (h > m) m = h;
   return m;
 }
 
@@ -56,63 +49,50 @@ await runBars({
     if (bar === undefined) return [];
     const close = Number(bar.c) / PRICE_SCALE;
     const high = Number(bar.h) / PRICE_SCALE;
-    const low = Number(bar.l) / PRICE_SCALE;
 
-    // Kondisi entry memakai lookback SEBELUM bar ini (low/high 720 bar lalu).
-    const prevLow = lows.length >= LOOKBACK ? minLow() : Infinity;
-    const prevHigh = highs.length >= LOOKBACK ? maxHigh() : -Infinity;
-    const prevClose = closes.length > 0 ? closes[closes.length - 1] : null;
-    const close60Ago =
-      closes.length > MOMENTUM_BARS ? closes[closes.length - 1 - MOMENTUM_BARS] : null;
-    const haveHistory = closes.length >= LOOKBACK;
+    const prevHigh = highs.length >= HIGH_N ? high120() : -Infinity;
+    const prevFast = emaFast;
+    const prevSlow = emaSlow;
 
     closes.push(close);
-    lows.push(low);
     highs.push(high);
-    if (closes.length > LOOKBACK) {
+    if (closes.length > HIGH_N) {
       closes.shift();
-      lows.shift();
       highs.shift();
     }
+    emaFast = emaFast === null ? close : close * (2 / (EMA_FAST + 1)) + emaFast * (1 - 2 / (EMA_FAST + 1));
+    emaSlow = emaSlow === null ? close : close * (2 / (EMA_SLOW + 1)) + emaSlow * (1 - 2 / (EMA_SLOW + 1));
 
     if (state.warmingUp) return [];
+    if (bought) return [];
     const pos = state.positions.get(SYMBOL);
-    const qty = pos?.qty ?? 0n;
-
-    if (qty > 0n) {
-      // --- Di posisi: trailing 0,6% dari peak. ---
-      if (close > peakClose) peakClose = close;
-      const trail = peakClose * (1 - TRAIL_PCT);
-      const timeUp = entrySeq >= 0 && state.seq - entrySeq >= TIME_STOP_BARS;
-      if (close < trail || timeUp) {
-        lastExitSeq = state.seq;
-        entrySeq = -1;
-        trades += 1;
-        return [{ side: "sell", symbol: SYMBOL, qty, max_slippage_bps: MAX_SLIPPAGE_BPS }];
-      }
+    if ((pos?.qty ?? 0n) > 0n) {
+      bought = true;
       return [];
     }
+    if (closes.length < HIGH_N || prevFast === null || prevSlow === null) return [];
 
-    // --- Flat: cari cross recovery segar dari dip dalam. ---
-    if (!haveHistory || prevClose === null || close60Ago === null) return [];
-    if (lastExitSeq >= 0 && state.seq - lastExitSeq < COOLDOWN_BARS) return [];
-    const deepDip = prevLow < prevHigh * (1 - DRAWDOWN_PCT);
-    const threshold = prevLow * (1 + RECOVERY_PCT);
-    const freshCross = prevClose <= threshold && close > threshold;
-    const recovering = close > close60Ago;
-    if (!deepDip || !freshCross || !recovering) return [];
+    // Tandai dip: close >=0,5% di bawah high 120 bar.
+    if (close < prevHigh * (1 - DIP_PCT)) dipArmed = true;
+
+    let signal = false;
+    if (state.seq <= PHASE1_END) {
+      signal = dipArmed && close > prevFast;
+    } else if (state.seq <= PHASE2_END) {
+      signal = close > prevSlow;
+    }
+    if (!signal) return [];
 
     let notional = (state.equity * BigInt(SIZE_BPS)) / 10000n;
     const room = state.weightRoom(SYMBOL);
     if (notional > room) notional = room;
     if (notional > state.cash) notional = state.cash;
     if (notional < 1_000_000n) return []; // di bawah min 1 USDC
-    entrySeq = state.seq;
-    peakClose = close;
+    bought = true;
     trades += 1;
     return [{ side: "buy", symbol: SYMBOL, notional_quote_units: notional, max_slippage_bps: MAX_SLIPPAGE_BPS }];
   },
   onDone(_state: BarsState) {
-    console.error(`kandidat-D selesai: trade yang diputuskan=${trades}`);
+    console.error(`kandidat-B-final selesai: trade yang diputuskan=${trades}`);
   },
 });
